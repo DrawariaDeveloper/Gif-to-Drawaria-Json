@@ -1,0 +1,703 @@
+class AdvancedPhysicsTool extends QBit {
+    // Propiedades del módulo y del motor de física
+    _canvas = null;
+    _ctx = null;
+    _isActive = false;
+    _physicsObjects = new Map();
+    _objectIdCounter = 0;
+    _lastRenderTime = 0;
+    _renderInterval = 1000 / 30;
+    _rainbowHue = 0;
+    _rainbowInterval = null;
+    _lastAutoKick = 0;
+
+    // Sistema de notificaciones, arrastre y WebSocket
+    _gameSocket = null;
+    _commandQueue = [];
+    _batchProcessor = null;
+    _isDragging = false;
+    _dragOffset = { x: 0, y: 0 };
+    _uiElements = {};
+
+    // Controles y modos de juego
+    controls = {
+        showTrails: false,
+        showDebug: false,
+        rainbowModeActive: false,
+        defaultObjectColor: '#000000',
+        autoKickEnabled: false,
+    };
+    matchMode = {
+        active: false,
+        scores: { p1: 0, p2: 0 },
+        goalCooldown: false,
+    };
+    playerTracker = {
+        players: new Map(),
+        detectionRadius: 40 * 1.3,
+        lastUpdateTime: 0
+    };
+
+    constructor() {
+        super("Football Physics Engine v5.1", '<i class="fas fa-futbol"></i>');
+    }
+
+    // ✅ QBit Methods - Optimizados para Cubic Engine
+    _onStartup() {
+        this.notify("info", "🚀 Iniciando Football Physics Engine v5.1...");
+        this._findGameCanvas();
+        this._setupWebSocketCapture();
+        this._startBatchProcessor();
+        this._startPhysicsLoop();
+        this.notify("success", "⚽ Motor de física inicializado correctamente.");
+
+        // Auto-add ball después de inicialización
+        setTimeout(() => {
+            this.addBallAtCenter();
+        }, 1000);
+    }
+
+    _loadInterface() {
+        this._createAdvancedPhysicsPanel();
+        this._setupAllEventListeners();
+        this._makePanelDraggable();
+        this.notify("info", "🎮 Interfaz de usuario cargada.");
+    }
+
+    _cleanup() {
+        this.notify("info", "🔄 Cerrando Football Physics Engine...");
+        this._stopPhysicsLoop();
+        this._stopBatchProcessor();
+
+        if (this._rainbowInterval) {
+            clearInterval(this._rainbowInterval);
+            this._rainbowInterval = null;
+        }
+
+        // Cleanup UI
+        const panel = document.getElementById("advanced-physics-panel");
+        if (panel?.parentNode) {
+            panel.parentNode.removeChild(panel);
+        }
+
+        // Clear canvas
+        if (this._ctx && this._canvas) {
+            this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+        }
+
+        this._physicsObjects.clear();
+        this._commandQueue.length = 0;
+
+        this.notify("success", "✅ Football Physics Engine cerrado correctamente.");
+    }
+
+    // ✅ Canvas Detection para Cubic Engine
+    _findGameCanvas() {
+        this._canvas = document.querySelector("#drawing-assistant-overlay") ||
+                        document.getElementById('canvas') ||
+                        document.querySelector('canvas') ||
+                        document.querySelector('#game-canvas') ||
+                        document.querySelector('.game-canvas');
+
+        if (this._canvas) {
+            this._ctx = this._canvas.getContext('2d');
+            this.notify("success", "🎯 Canvas del juego detectado.");
+            return true;
+        } else {
+            this.notify("error", "❌ Canvas del juego no encontrado.");
+            return false;
+        }
+    }
+
+ // ✅ OPTIMIZAR: En _setupWebSocketCapture()
+_setupWebSocketCapture() {
+    const self = this;
+    const originalWebSocketConstructor = WebSocket;
+    
+    window.WebSocket = function(...args) {
+        const ws = new originalWebSocketConstructor(...args);
+        
+        // ✅ FIX: Verificar URL correctamente
+        if (args && args.includes('drawaria')) { // Era: args.includes('drawaria')
+            self._gameSocket = ws;
+            console.log('🔗 WebSocket capturado en constructor');
+            self.notify("success", "🌐 WebSocket conectado.");
+        }
+        
+        return ws;
+    };
+
+        // Strategy 2: Direct detection de WebSocket existente
+        const detectExistingWebSocket = () => {
+            for (let prop in window) {
+                try {
+                    if (window[prop] instanceof WebSocket &&
+                        window[prop].url &&
+                        window[prop].url.includes('drawaria')) {
+
+                        self._gameSocket = window[prop];
+                        console.log('🔍 WebSocket existente detectado');
+                        return true;
+                    }
+                } catch (e) {
+                    // Ignore access errors
+                }
+            }
+            return false;
+        };
+
+        // Try immediate detection
+        if (!detectExistingWebSocket()) {
+            // Retry detection every second for 10 seconds
+            let attempts = 0;
+            const detector = setInterval(() => {
+                attempts++;
+                if (detectExistingWebSocket() || attempts >= 10) {
+                    clearInterval(detector);
+                }
+            }, 1000);
+        }
+    }
+
+    // ✅ Batch Processing optimizado para Cubic Engine
+    _startBatchProcessor() {
+        if (this._batchProcessor) return;
+
+        this._batchProcessor = setInterval(() => {
+            this._flushCommandQueue();
+        }, 45); // 45ms = ~22 FPS optimal
+
+        console.log("🔄 Batch processor iniciado (Cubic Engine mode)");
+    }
+
+    _stopBatchProcessor() {
+        if (this._batchProcessor) {
+            clearInterval(this._batchProcessor);
+            this._batchProcessor = null;
+            this._flushCommandQueue();
+            console.log("⏹️ Batch processor detenido");
+        }
+    }
+
+    // ✅ Sistema de comandos optimizado para Cubic Engine
+    _enqueueDrawCommand(x1, y1, x2, y2, color, thickness) {
+        if (!this._canvas || !this._gameSocket) {
+            return; // Silent fail para mejor UX
+        }
+
+        const normX1 = (x1 / this._canvas.width).toFixed(4);
+        const normY1 = (y1 / this._canvas.height).toFixed(4);
+        const normX2 = (x2 / this._canvas.width).toFixed(4);
+        const normY2 = (y2 / this._canvas.height).toFixed(4);
+
+        // ✅ Comando optimizado para Drawaria WebSocket
+        const cmd = `42["drawcmd",0,[${normX1},${normY1},${normX2},${normY2},false,${-Math.abs(thickness)},"${color}",0,0,{}]]`;
+        this._commandQueue.push(cmd);
+
+        // ✅ Renderizado local inmediato
+        if (this._ctx) {
+            this._ctx.strokeStyle = color;
+            this._ctx.lineWidth = thickness;
+            this._ctx.lineCap = 'round';
+            this._ctx.lineJoin = 'round';
+            this._ctx.beginPath();
+            this._ctx.moveTo(x1, y1);
+            this._ctx.lineTo(x2, y2);
+            this._ctx.stroke();
+        }
+
+        // Auto-flush si queue muy llena
+        if (this._commandQueue.length >= 15) {
+            this._flushCommandQueue();
+        }
+    }
+
+    _flushCommandQueue() {
+        if (!this._gameSocket || this._gameSocket.readyState !== WebSocket.OPEN || this._commandQueue.length === 0) {
+            return;
+        }
+
+        const batch = this._commandQueue.splice(0, 12);
+        batch.forEach(cmd => {
+            try {
+                this._gameSocket.send(cmd);
+            } catch (e) {
+                console.warn('Failed to send command:', e);
+            }
+        });
+    }
+
+    _sendClearCommand() {
+        if (!this._gameSocket || this._gameSocket.readyState !== WebSocket.OPEN) {
+            return false;
+        }
+
+        try {
+            this._gameSocket.send(`42["clear",0]`);
+
+            if (this._ctx && this._canvas) {
+                this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+            }
+
+            this._commandQueue.length = 0;
+            return true;
+        } catch (e) {
+            console.error("Error al limpiar:", e);
+            return false;
+        }
+    }
+
+    // --- LÓGICA COMPLETA DEL MOTOR DE FÍSICA ---
+
+    _startPhysicsLoop() {
+        if (this._isActive) return;
+        this._isActive = true;
+        this._lastAutoKick = 0;
+        console.log("🚀 Physics loop iniciado (Cubic Engine)");
+        this._update(performance.now());
+    }
+
+    _stopPhysicsLoop() {
+        this._isActive = false;
+        console.log("🛑 Physics loop detenido");
+    }
+
+    _update(currentTime) {
+        if (!this._isActive) return;
+
+        const deltaTime = (currentTime - this._lastRenderTime) / 1000;
+        if (deltaTime < this._renderInterval / 1000) {
+            requestAnimationFrame(this._update.bind(this));
+            return;
+        }
+        this._lastRenderTime = currentTime;
+
+        this._physicsObjects.forEach(obj => {
+            obj.velocity.y += obj.gravity * deltaTime;
+            obj.velocity.x *= obj.friction;
+            obj.velocity.y *= obj.friction;
+            obj.position.x += obj.velocity.x;
+            obj.position.y += obj.velocity.y;
+        });
+
+        this._checkCollisions();
+        this._checkGoals();
+        this._drawObjects();
+        this._checkAutoKick();
+
+        requestAnimationFrame(this._update.bind(this));
+    }
+
+    _checkCollisions() {
+        const gameWidth = 100;
+        const gameHeight = 100;
+        this._physicsObjects.forEach(obj => {
+            if (obj.position.x - obj.radius < 0) {
+                obj.velocity.x = -obj.velocity.x * 0.8;
+                obj.position.x = obj.radius;
+            }
+            if (obj.position.x + obj.radius > gameWidth) {
+                obj.velocity.x = -obj.velocity.x * 0.8;
+                obj.position.x = gameWidth - obj.radius;
+            }
+            if (obj.position.y - obj.radius < 0) {
+                obj.velocity.y = -obj.velocity.y * 0.8;
+                obj.position.y = obj.radius;
+            }
+            if (obj.position.y + obj.radius > gameHeight) {
+                obj.velocity.y = -obj.velocity.y * 0.8;
+                obj.position.y = gameHeight - obj.radius;
+            }
+
+            this._physicsObjects.forEach(otherObj => {
+                if (obj.id === otherObj.id) return;
+                const dx = otherObj.position.x - obj.position.x;
+                const dy = otherObj.position.y - obj.position.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const minDistance = obj.radius + otherObj.radius;
+                if (distance < minDistance) {
+                    const angle = Math.atan2(dy, dx);
+                    const overlap = minDistance - distance;
+                    obj.position.x -= (overlap / 2) * Math.cos(angle);
+                    obj.position.y -= (overlap / 2) * Math.sin(angle);
+                    otherObj.position.x += (overlap / 2) * Math.cos(angle);
+                    otherObj.position.y += (overlap / 2) * Math.sin(angle);
+                    const v1 = { x: obj.velocity.x, y: obj.velocity.y };
+                    const v2 = { x: otherObj.velocity.x, y: otherObj.velocity.y };
+                    obj.velocity.x = v2.x;
+                    obj.velocity.y = v2.y;
+                    otherObj.velocity.x = v1.x;
+                    otherObj.velocity.y = v1.y;
+                }
+            });
+
+            this._updatePlayerDetection();
+            this.playerTracker.players.forEach(p => {
+                const dx = p.x - obj.position.x;
+                const dy = p.y - obj.position.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const radius = obj.radius;
+
+                if (distance < radius + p.radius) {
+                    const angle = Math.atan2(dy, dx);
+                    const impactForce = 0.5;
+                    obj.velocity.x -= impactForce * Math.cos(angle);
+                    obj.velocity.y -= impactForce * Math.sin(angle);
+                }
+            });
+        });
+    }
+
+    addObject(objectData) {
+        if (objectData.type !== 'ball') return;
+        const newId = this._objectIdCounter++;
+        const newObject = {
+            id: newId,
+            type: objectData.type,
+            position: { x: objectData.x, y: objectData.y },
+            velocity: { x: 0, y: 0 },
+            gravity: 0.05,
+            friction: 0.98,
+            radius: objectData.radius,
+            color: objectData.color || this.controls.defaultObjectColor,
+            trail: this.controls.showTrails ? [] : null,
+        };
+        this._physicsObjects.set(newId, newObject);
+        return newObject;
+    }
+
+    _drawObjects() {
+        const { _ctx: ctx, _canvas: canvas } = this;
+        if (!ctx || !canvas) return;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const widthRatio = canvas.width / 100;
+        const heightRatio = canvas.height / 100;
+        this._physicsObjects.forEach(obj => {
+            if (this.controls.showTrails && obj.trail) {
+                obj.trail.push({
+                    x: obj.position.x * widthRatio,
+                    y: obj.position.y * heightRatio,
+                    color: obj.color
+                });
+                while (obj.trail.length > 50) obj.trail.shift();
+                obj.trail.forEach((point, index) => {
+                    ctx.beginPath();
+                    ctx.arc(point.x, point.y, obj.radius * widthRatio * (index / 50), 0, 2 * Math.PI);
+                    ctx.fillStyle = point.color;
+                    ctx.globalAlpha = index / 50;
+                    ctx.fill();
+                });
+                ctx.globalAlpha = 1;
+            }
+            ctx.beginPath();
+            ctx.arc(obj.position.x * widthRatio, obj.position.y * heightRatio, obj.radius * widthRatio, 0, 2 * Math.PI);
+            ctx.fillStyle = obj.color;
+            ctx.fill();
+            ctx.strokeStyle = "black";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            if (this.controls.showDebug) {
+                ctx.fillStyle = 'red';
+                ctx.font = '12px Arial';
+                ctx.fillText(`ID: ${obj.id}`, obj.position.x * widthRatio, obj.position.y * heightRatio - 15);
+                ctx.fillText(`Vel: (${obj.velocity.x.toFixed(2)}, ${obj.velocity.y.toFixed(2)})`, obj.position.x * widthRatio - 20, obj.position.y * heightRatio);
+            }
+        });
+    }
+
+    toggleMatchMode() {
+        this.matchMode.active = !this.matchMode.active;
+        if (this.matchMode.active) {
+            this.notify("info", "Modo Partido Activado.");
+            this.createFootballField();
+            this._physicsObjects.clear();
+            this.addBallAtCenter();
+            this.matchMode.scores = { p1: 0, p2: 0 };
+        } else {
+            this.notify("info", "Modo Partido Desactivado.");
+            this.clearField();
+        }
+    }
+
+    _checkGoals() {
+        if (!this.matchMode.active || this.matchMode.goalCooldown) return;
+        const ball = Array.from(this._physicsObjects.values()).find(obj => obj.type === 'ball');
+        if (!ball) return;
+        const goalSize = 10;
+        const goal1X = 0;
+        const goal2X = 100;
+        const p1Goal = ball.position.x <= goal1X && ball.position.y > 50 - goalSize / 2 && ball.position.y < 50 + goalSize / 2;
+        const p2Goal = ball.position.x >= goal2X && ball.position.y > 50 - goalSize / 2 && ball.position.y < 50 + goalSize / 2;
+        if (p1Goal) {
+            this._scoreGoal('p2');
+        } else if (p2Goal) {
+            this._scoreGoal('p1');
+        }
+    }
+
+    _scoreGoal(scoringPlayer) {
+        this.matchMode.scores[scoringPlayer]++;
+        this.notify("success", `¡GOL! Puntuación: P1 - ${this.matchMode.scores.p1} | P2 - ${this.matchMode.scores.p2}`);
+        this.matchMode.goalCooldown = true;
+        setTimeout(() => {
+            this.matchMode.goalCooldown = false;
+            this._resetBall();
+        }, 3000);
+    }
+
+    _resetBall() {
+        this._physicsObjects.forEach(obj => {
+            if (obj.type === 'ball') {
+                obj.position.x = 50;
+                obj.position.y = 50;
+                obj.velocity.x = 0;
+                obj.velocity.y = 0;
+            }
+        });
+    }
+
+    createFootballField() {
+        const fieldCommands = [
+            { x1: 5, y1: 10, x2: 5, y2: 90 },
+            { x1: 95, y1: 10, x2: 95, y2: 90 },
+            { x1: 5, y1: 10, x2: 95, y2: 10 },
+            { x1: 5, y1: 90, x2: 95, y2: 90 },
+            { x1: 50, y1: 10, x2: 50, y2: 90 },
+            { x1: 50, y1: 50, x2: 50, y2: 50, radius: 10 },
+            { x1: 5, y1: 30, x2: 25, y2: 30 },
+            { x1: 25, y1: 30, x2: 25, y2: 70 },
+            { x1: 25, y1: 70, x2: 5, y2: 70 },
+            { x1: 95, y1: 30, x2: 75, y2: 30 },
+            { x1: 75, y1: 30, x2: 75, y2: 70 },
+            { x1: 75, y1: 70, x2: 95, y2: 70 },
+            { x1: 25, y1: 50, x2: 25, y2: 50, radius: 5 },
+            { x1: 75, y1: 50, x2: 75, y2: 50, radius: 5 },
+        ];
+        const drawCommands = {
+            "type": "draw",
+            "lines": fieldCommands.map(cmd => ({
+                "start": { "x": cmd.x1, "y": cmd.y1 },
+                "end": { "x": cmd.x2, "y": cmd.y2 },
+                "color": "#ffffff",
+                "thickness": 3
+            }))
+        };
+        this.enviarComandoDibujo(drawCommands);
+    }
+
+    clearField() {
+        this.enviarComandoDibujo({ "type": "clear" });
+    }
+
+    toggleRainbowMode(active) {
+        if (active) {
+            this._rainbowInterval = setInterval(() => {
+                this._rainbowHue = (this._rainbowHue + 1) % 360;
+                this.controls.defaultObjectColor = `hsl(${this._rainbowHue}, 100%, 50%)`;
+            }, 50);
+        } else {
+            clearInterval(this._rainbowInterval);
+            this._rainbowInterval = null;
+            this.controls.defaultObjectColor = '#000000';
+        }
+    }
+
+    _checkAutoKick() {
+        if (!this.controls.autoKickEnabled) return;
+        const now = performance.now();
+        if (now - this._lastAutoKick < 2000) return;
+        const ball = Array.from(this._physicsObjects.values()).find(obj => obj.type === 'ball');
+        if (!ball) return;
+        const isCloserToLeftGoal = ball.position.x < 50;
+        const targetGoalX = isCloserToLeftGoal ? 95 : 5;
+        const targetGoalY = 50;
+        const dx = targetGoalX - ball.position.x;
+        const dy = targetGoalY - ball.position.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance > 0) {
+            const kickForce = 0.8;
+            ball.velocity.x += (dx / distance) * kickForce;
+            ball.velocity.y += (dy / distance) * kickForce;
+            this._lastAutoKick = now;
+        }
+    }
+
+    _makePanelDraggable() {
+        const header = document.getElementById("physics-header");
+        const container = header?.parentElement;
+
+        if (!header || !container) return;
+
+        header.addEventListener('mousedown', (e) => {
+            this._isDragging = true;
+            this._dragOffset.x = e.clientX - container.offsetLeft;
+            this._dragOffset.y = e.clientY - container.offsetTop;
+            container.style.cursor = 'grabbing';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (this._isDragging) {
+                const newLeft = e.clientX - this._dragOffset.x;
+                const newTop = e.clientY - this._dragOffset.y;
+                const maxLeft = window.innerWidth - container.offsetWidth;
+                const maxTop = window.innerHeight - container.offsetHeight;
+
+                container.style.left = Math.min(Math.max(0, newLeft), maxLeft) + 'px';
+                container.style.top = Math.min(Math.max(0, newTop), maxTop) + 'px';
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (this._isDragging) {
+                this._isDragging = false;
+                if (container) container.style.cursor = 'default';
+            }
+        });
+    }
+
+    toggleAutoKick() {
+        this.controls.autoKickEnabled = !this.controls.autoKickEnabled;
+        this._lastAutoKick = 0;
+        const message = this.controls.autoKickEnabled ?
+            "🤖 Auto-Kick Activado" : "🤖 Auto-Kick Desactivado";
+        this.notify("info", message);
+    }
+
+    addBallAtCenter() {
+        const newBall = this.addObject({
+            type: 'ball',
+            x: 50,
+            y: 50,
+            radius: 2,
+            color: this.controls.rainbowModeActive ?
+                `hsl(${this._rainbowHue}, 100%, 50%)` :
+                this.controls.defaultObjectColor
+        });
+        if (newBall) {
+            this.notify("success", "Pelota agregada al juego");
+        }
+    }
+
+    enviarComandoDibujo(drawCommands) {
+        if (!this._gameSocket || this._gameSocket.readyState !== WebSocket.OPEN) {
+            this.notify("error", "WebSocket no disponible para enviar comando de dibujo");
+            return;
+        }
+        if (drawCommands.type === "draw") {
+            drawCommands.lines.forEach(line => {
+                const x1 = (line.start.x / 100) * this._canvas.width;
+                const y1 = (line.start.y / 100) * this._canvas.height;
+                const x2 = (line.end.x / 100) * this._canvas.width;
+                const y2 = (line.end.y / 100) * this._canvas.height;
+                this._enqueueDrawCommand(x1, y1, x2, y2, line.color, line.thickness);
+            });
+        } else if (drawCommands.type === "clear") {
+            this._sendClearCommand();
+        }
+    }
+
+    _updatePlayerDetection() {
+        const now = performance.now();
+        if (now - this.playerTracker.lastUpdateTime < 100) return;
+        this.playerTracker.players.clear();
+        try {
+            const selfPlayer = document.querySelector('.spawnedavatar.spawnedavatar-self');
+            if (selfPlayer) {
+                const rect = selfPlayer.getBoundingClientRect();
+                const canvasRect = this._canvas.getBoundingClientRect();
+                this.playerTracker.players.set('self', {
+                    id: 'self',
+                    x: ((rect.left - canvasRect.left) / canvasRect.width) * 100,
+                    y: ((rect.top - canvasRect.top) / canvasRect.height) * 100,
+                    radius: 3,
+                    type: 'self'
+                });
+            }
+            const otherPlayers = document.querySelectorAll('.spawnedavatar.spawnedavatar-otherplayer');
+            otherPlayers.forEach((player, index) => {
+                const rect = player.getBoundingClientRect();
+                const canvasRect = this._canvas.getBoundingClientRect();
+                this.playerTracker.players.set(`other_${index}`, {
+                    id: `other_${index}`,
+                    x: ((rect.left - canvasRect.left) / canvasRect.width) * 100,
+                    y: ((rect.top - canvasRect.top) / canvasRect.height) * 100,
+                    radius: 3,
+                    type: 'other'
+                });
+            });
+        } catch (e) {
+            console.warn("Error detectando jugadores:", e);
+        }
+        this.playerTracker.lastUpdateTime = now;
+    }
+
+    // ✅ UI Creation optimizada para Cubic Engine
+    _createAdvancedPhysicsPanel() {
+        const container = document.createElement("div");
+        container.id = "advanced-physics-panel";
+        container.style.cssText = `
+            position: fixed;
+            top: 50px;
+            left: 50px;
+            width: 280px;
+            background: linear-gradient(135deg, #0f0f23, #1a1a3a);
+            border: 2px solid #00d4ff;
+            border-radius: 15px;
+            color: white;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            z-index: 10000;
+            overflow: hidden;
+            box-shadow: 0 0 30px rgba(0,212,255,0.4);
+        `;
+
+        container.innerHTML = `
+            <div id="physics-header" style="background: linear-gradient(45deg, #00d4ff, #0099cc); padding: 12px; text-align: center; font-weight: bold; cursor: move;">
+                ⚽ Football Physics Engine v5.1
+            </div>
+            <div style="padding: 20px;">
+                <div style="margin-bottom: 15px;">
+                    <button id="create-field-btn" style="width: 100%; padding: 10px; background: linear-gradient(135deg, #228B22, #32CD32); color: white; border: none; border-radius: 8px; margin-bottom: 8px;">🏟️ Create Field</button>
+                    <button id="toggle-match-btn" style="width: 100%; padding: 10px; background: linear-gradient(135deg, #ff6b35, #e84393); color: white; border: none; border-radius: 8px; margin-bottom: 8px;">🏆 Match Mode</button>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <button id="add-ball-btn" style="width: 48%; padding: 8px; background: linear-gradient(135deg, #ff6b6b, #ee5a5a); color: white; border: none; border-radius: 6px; margin-right: 4%;">⚽ Ball</button>
+                    <button id="auto-kick-btn" style="width: 48%; padding: 8px; background: linear-gradient(135deg, #6c5ce7, #5f3dc4); color: white; border: none; border-radius: 6px;">🤖 Auto</button>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: flex; align-items: center; margin-bottom: 5px;"><input type="checkbox" id="rainbow-toggle" style="margin-right: 8px;"> 🌈 Rainbow Mode</label>
+                    <label style="display: flex; align-items: center; margin-bottom: 5px;"><input type="checkbox" id="trails-toggle" style="margin-right: 8px;"> ✨ Show Trails</label>
+                    <label style="display: flex; align-items: center; margin-bottom: 5px;"><input type="checkbox" id="debug-toggle" style="margin-right: 8px;"> 🔍 Debug Info</label>
+                </div>
+                <button id="clear-field-btn" style="width: 100%; padding: 10px; background: linear-gradient(135deg, #e74c3c, #c0392b); color: white; border: none; border-radius: 8px;">🧹 Clear All</button>
+            </div>
+        `;
+
+        this.htmlElements.section.appendChild(container);
+    }
+
+    _setupAllEventListeners() {
+        // Physics controls
+        document.getElementById("create-field-btn")?.addEventListener('click', () => this.createFootballField());
+        document.getElementById("clear-field-btn")?.addEventListener('click', () => this.clearField());
+        document.getElementById("toggle-match-btn")?.addEventListener('click', () => this.toggleMatchMode());
+        document.getElementById("add-ball-btn")?.addEventListener('click', () => this.addBallAtCenter());
+        document.getElementById("auto-kick-btn")?.addEventListener('click', () => this.toggleAutoKick());
+
+        // Visual controls
+        document.getElementById("rainbow-toggle")?.addEventListener('change', (e) => {
+            this.controls.rainbowModeActive = e.target.checked;
+            this.toggleRainbowMode(e.target.checked);
+        });
+        document.getElementById("trails-toggle")?.addEventListener('change', (e) => {
+            this.controls.showTrails = e.target.checked;
+        });
+        document.getElementById("debug-toggle")?.addEventListener('change', (e) => {
+            this.controls.showDebug = e.target.checked;
+        });
+    }
+}
+
+// ✅ CARGAR en Cubic Engine - Sin limitaciones Tampermonkey
+this.loadExtension(AdvancedPhysicsTool);
