@@ -1,156 +1,732 @@
-// --- Sub-Module 5: PatternDrawerTool ---
-// Draws various patterns on Drawaria.online, rendering locally and globally.
-class PatternDrawerTool extends QBit {
+class AdvancedPhysicsTool extends QBit {
     _canvas = null;
     _ctx = null;
-    _drawingActive = false;
-    _socketStatus = 'disconnected';
-    _executionLine = []; // Stores draw commands in game coordinates (0-100)
+    _isActive = false;
+    _physicsObjects = new Map();
+    _objectIdCounter = 0;
+    _lastRenderTime = 0;
+    _renderInterval = 1000 / 60;
+    _gameSocket = null;
+    _ui = {};
+    _statsInterval = null;
 
-    _ui = {}; // UI elements references
+    // Constantes de física simplificadas
+    PHYSICS_CONSTANTS = {
+        GRAVITY: 500,
+        BALL_MASS: 0.25,
+        BALL_RADIUS: 40,
+        TIMESTEP: 1 / 60,
+        MAX_VELOCITY: 800,
+        AIR_RESISTANCE: 0.008,
+        RESTITUTION_BALL: 0.75,
+        RESTITUTION_WALL: 0.6,
+        FRICTION_GRASS: 0.85
+    };
+
+    // Constantes del campo
+    FIELD_CONSTANTS = {
+        GOAL_P1_COLOR: '#555555',
+        GOAL_P2_COLOR: '#787878',
+        TEXT_COLOR: '#000000',
+        GRASS_COLOR: '#228B22',
+        GOAL_THICKNESS: 10
+    };
+
+    // Sistema de match simplificado
+    matchMode = {
+        active: false,
+        scores: { p1: 0, p2: 0 },
+        playArea: null,
+        goalCooldown: false,
+        maxGoals: 5
+    };
+
+    controls = {
+        showTrails: false,
+        defaultObjectColor: '#000000',
+        alternatePhysics: 'normal'
+    };
+
+    gameStats = {
+        totalCollisions: 0,
+        maxVelocityReached: 0,
+        objectsCreated: 0,
+        totalGoals: 0
+    };
 
     constructor() {
-        super("Pattern Drawer", '<i class="fas fa-th-large"></i>'); // Unique name and icon
+        super("Football Physics Engine v6.0", '<i class="fas fa-futbol"></i>');
         this._onStartup();
     }
 
     _onStartup() {
-        this._canvas = document.getElementById('canvas');
-        if (this._canvas) {
-            this._ctx = this._canvas.getContext('2d');
-        } else {
-            this.notify("error", "Canvas del juego no encontrado para Pattern Drawer.");
-            return;
-        }
-
+        this.notify("info", "🚀 Iniciando motor de fútbol...");
+        this._findGameCanvas();
+        this._setupWebSocketCapture();
         this._loadInterface();
-        this._setupEventListeners();
-        setInterval(() => { // Periodically check and update connection status
-            this._updateConnectionStatus(getGameSocket() && getGameSocket().readyState === WebSocket.OPEN ? 'connected' : 'disconnected');
-        }, 1000);
-        this.notify("info", "Módulo 'Pattern Drawer' cargado.");
+        this._startAdvancedStatsMonitoring();
+        this.notify("success", "⚽ Motor de fútbol inicializado y listo.");
+    }
+
+    _onClose() {
+        this.notify("info", "🔄 Cerrando motor de física...");
+        this._stopPhysicsLoop();
+        this._stopAdvancedStatsMonitoring();
+        this._physicsObjects.clear();
+        this._ctx?.clearRect(0, 0, this._canvas.width, this._canvas.height);
+        this.notify("success", "✅ Motor cerrado correctamente.");
     }
 
     _loadInterface() {
-        const container = domMake.Tree("div", { id: `${this.identifier}-container`, class: "module-section" });
+        if (this._ui.panel) {
+            this._ui.panel.remove();
+        }
+
+        const container = domMake.Tree("div", {
+            id: `${this.identifier}-container`,
+            style: `
+                display: flex; flex-direction: column; gap: 10px;
+                padding: 15px; background: rgba(0,0,0,0.2); border-radius: 8px;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.3); color: white;
+            `
+        });
+        this._ui.panel = container;
         this.htmlElements.section.appendChild(container);
 
-        // Connection Status
-        container.appendChild(domMake.Tree("div", { class: "module-section-title" }, ["Estado de Conexión"]));
-        const connectionStatusDiv = domMake.Tree("div", {}, [
-            domMake.Tree("span", { id: `${this.identifier}-connectionStatus`, class: `module-status-indicator module-status-${this._socketStatus}` }),
-            domMake.Tree("span", { id: `${this.identifier}-statusText` }, [this._socketStatus.charAt(0).toUpperCase() + this._socketStatus.slice(1)])
-        ]);
-        container.appendChild(connectionStatusDiv);
+        // Título
+        container.appendChild(domMake.Tree("h3", { 
+            style: "margin: 0; font-size: 16px; text-align: center;" 
+        }, "⚽ FOOTBALL PHYSICS v6.0"));
 
-        // Pattern Selector
-        container.appendChild(domMake.Tree("div", { class: "module-section-title" }, ["Seleccionar Patrón"]));
-        this._ui.patternSelect = domMake.Tree("select", { id: `${this.identifier}-patternSelect`, class: "module-form-control" });
-        const patterns = [
-            "grid", "zigzag", "spiral", "waves", "circles", "diagonals",
-            "star", "crosshatch", "triangles", "dots", "hexagons", "radiance",
-            "checkerboard", "swirls", "lattice", "fractal", "arcs", "mosaic",
-            "ripples", "vortex"
-        ];
-        patterns.forEach(p => {
-            this._ui.patternSelect.appendChild(domMake.Tree("option", { value: p }, [p.charAt(0).toUpperCase() + p.slice(1)]));
+        // Controles principales
+        const controlsDiv = domMake.Tree("div", { 
+            style: "display: flex; flex-direction: column; gap: 8px;" 
         });
-        container.appendChild(this._ui.patternSelect);
 
-        // Drawing Controls Inputs
-        container.appendChild(domMake.Tree("div", { class: "module-section-title" }, ["Configuración de Patrón"]));
-        const controlsGroup = domMake.Tree("div", { class: "module-btn-group", style: "flex-wrap: wrap;" }); // Using btn-group for grid-like layout
-        const addInput = (id, label, type, min, max, value, title) => {
-            const input = domMake.Tree("input", { type, id: `${this.identifier}-${id}`, min, max, value, title, class: "module-form-control" });
-            this._ui[id.replace(/-/g, '')] = input; // Store reference
-            const wrapper = domMake.Tree("div", { style: "flex: 1 1 48%;" }); // Approx half width
-            wrapper.appendAll(domMake.Tree("label", { for: `${this.identifier}-${id}` }, [label]), input);
-            controlsGroup.appendChild(wrapper);
+        // Botón crear campo
+        const createFieldBtn = domMake.Tree("button", {
+            id: this.identifier + '-create-field-btn',
+            style: `width: 100%; padding: 12px; background: linear-gradient(135deg, #2ecc71, #27ae60); color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;`
+        }, "🏟️ Create Football Field");
+
+        // Botón toggle physics
+        const togglePhysicsBtn = domMake.Tree("button", {
+            id: this.identifier + '-toggle-physics',
+            style: `width: 100%; padding: 12px; background: linear-gradient(135deg, #3498db, #2980b9); color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;`
+        }, "🚀 Launch Physics Engine");
+
+        controlsDiv.appendChild(createFieldBtn);
+        controlsDiv.appendChild(togglePhysicsBtn);
+
+        // Controles de objetos
+        const ballControlsDiv = domMake.Tree("div", {
+            style: "display: flex; gap: 8px;"
+        });
+        
+        const addBallBtn = domMake.Tree("button", {
+            id: this.identifier + '-add-ball-btn',
+            style: `flex: 1; padding: 10px; background: linear-gradient(135deg, #e74c3c, #c0392b); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;`
+        }, "⚽ Add Ball");
+
+        const resetAllBtn = domMake.Tree("button", {
+            id: this.identifier + '-reset-all-btn',
+            style: `flex: 1; padding: 10px; background: linear-gradient(135deg, #f1c40f, #f39c12); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;`
+        }, "🔄 Reset");
+
+        ballControlsDiv.appendChild(addBallBtn);
+        ballControlsDiv.appendChild(resetAllBtn);
+        controlsDiv.appendChild(ballControlsDiv);
+
+        // Match Mode Toggle
+        const matchModeToggle = domMake.Tree("button", {
+            id: this.identifier + '-match-mode-toggle',
+            style: `width: 100%; padding: 12px; background: linear-gradient(135deg, #9b59b6, #8e44ad); color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold;`
+        }, "🏆 Match Mode");
+        controlsDiv.appendChild(matchModeToggle);
+
+        // Limpiar todo
+        const clearAllBtn = domMake.Tree("button", {
+            id: this.identifier + '-clear-all-btn',
+            style: `width: 100%; padding: 10px; background: linear-gradient(135deg, #7f8c8d, #34495e); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;`
+        }, "🗑️ Clear All");
+        controlsDiv.appendChild(clearAllBtn);
+
+        container.appendChild(controlsDiv);
+
+        // Marcador (oculto inicialmente)
+        const scoreboard = domMake.Tree("div", {
+            id: this.identifier + '-scoreboard',
+            style: `display: none; text-align: center; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px; font-weight: bold; font-size: 18px; background: rgba(0,0,0,0.4); border-radius: 8px; padding: 15px; border: 2px solid #ffd700;`
+        });
+
+        const scoreTitle = domMake.Tree("h4", { style: "margin: 0 0 10px 0; color: #ffd700; font-size: 14px;" }, "🏆 MATCH SCORE");
+        const scoreContainer = domMake.Tree("div", { style: "display: flex; justify-content: space-between; font-size: 18px; font-weight: bold;" });
+        
+        const scoreP1 = domMake.Tree("span", { id: this.identifier + '-score-p1', style: "color: #ff6b6b;" }, "0");
+        const scoreP2 = domMake.Tree("span", { id: this.identifier + '-score-p2', style: "color: #74b9ff;" }, "0");
+        
+        scoreContainer.appendChild(domMake.Tree("span", {}, "P1: "));
+        scoreContainer.appendChild(scoreP1);
+        scoreContainer.appendChild(domMake.Tree("span", { style: "color: #666;" }, " vs "));
+        scoreContainer.appendChild(domMake.Tree("span", {}, "P2: "));
+        scoreContainer.appendChild(scoreP2);
+        
+        scoreboard.appendChild(scoreTitle);
+        scoreboard.appendChild(scoreContainer);
+        container.appendChild(scoreboard);
+
+        // Estadísticas
+        const statsDiv = domMake.Tree("div", {
+            id: this.identifier + '-stats',
+            style: `font-size: 10px; text-align: center; color: #aaa; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;`
+        });
+        const objectCount = domMake.Tree("span", { id: this.identifier + '-object-count' }, "0");
+        const goalsCount = domMake.Tree("span", { id: this.identifier + '-goals-count' }, "0");
+        const statsContainer = domMake.Tree("div", {});
+        statsContainer.appendChild(domMake.Tree("span", {}, "Objects: "));
+        statsContainer.appendChild(objectCount);
+        statsContainer.appendChild(domMake.Tree("span", {}, " | Goals: "));
+        statsContainer.appendChild(goalsCount);
+        statsDiv.appendChild(statsContainer);
+        container.appendChild(statsDiv);
+
+        // Guardar referencias
+        this._ui.createFieldBtn = createFieldBtn;
+        this._ui.togglePhysicsBtn = togglePhysicsBtn;
+        this._ui.addBallBtn = addBallBtn;
+        this._ui.resetAllBtn = resetAllBtn;
+        this._ui.matchModeToggle = matchModeToggle;
+        this._ui.clearAllBtn = clearAllBtn;
+        this._ui.scoreboard = scoreboard;
+        this._ui.scoreP1 = scoreP1;
+        this._ui.scoreP2 = scoreP2;
+        this._ui.objectCount = objectCount;
+        this._ui.goalsCount = goalsCount;
+
+        // Event listeners
+        this._ui.createFieldBtn?.addEventListener('click', () => this.createFootballField());
+        this._ui.togglePhysicsBtn?.addEventListener('click', () => this.togglePhysics());
+        this._ui.addBallBtn?.addEventListener('click', () => this.addBallAtCenter());
+        this._ui.resetAllBtn?.addEventListener('click', () => this.resetAllObjects());
+        this._ui.matchModeToggle?.addEventListener('click', () => this.toggleMatchMode());
+        this._ui.clearAllBtn?.addEventListener('click', () => this.clearAllObjects());
+    }
+
+    _findGameCanvas() {
+        this._canvas = document.getElementById('canvas') || document.querySelector('canvas');
+        if (this._canvas) {
+            this._ctx = this._canvas.getContext('2d');
+            this.notify("success", "🎯 Canvas detectado.");
+            return true;
+        } else {
+            this.notify("error", "❌ Canvas no encontrado.");
+            return false;
+        }
+    }
+
+    _setupWebSocketCapture() {
+        if (typeof getGameSocket !== 'function') {
+            this.notify("error", "❌ Función getGameSocket no disponible.");
+            return false;
+        }
+        
+        this._gameSocket = getGameSocket();
+        if (this._gameSocket && this._gameSocket.readyState === WebSocket.OPEN) {
+            this.notify("success", "🌐 WebSocket conectado.");
+            return true;
+        } else {
+            this.notify("warning", "⚠️ WebSocket no disponible.");
+            return false;
+        }
+    }
+
+    // ✅ MÉTODO DE DIBUJO OPTIMIZADO
+    _sendDrawCommand(x1, y1, x2, y2, color, thickness) {
+        if (!this._canvas) return false;
+        
+        const socket = getGameSocket();
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            return false;
+        }
+
+        const normX1 = (x1 / this._canvas.width).toFixed(4);
+        const normY1 = (y1 / this._canvas.height).toFixed(4);
+        const normX2 = (x2 / this._canvas.width).toFixed(4);
+        const normY2 = (y2 / this._canvas.height).toFixed(4);
+
+        const command = `42["drawcmd",0,[${normX1},${normY1},${normX2},${normY2},false,${-Math.abs(thickness)},"${color}",0,0,{}]]`;
+        
+        try {
+            socket.send(command);
+        } catch (error) {
+            return false;
+        }
+
+        // Renderizado local
+        if (this._ctx) {
+            this._ctx.strokeStyle = color;
+            this._ctx.lineWidth = thickness;
+            this._ctx.lineCap = 'round';
+            this._ctx.lineJoin = 'round';
+            this._ctx.beginPath();
+            this._ctx.moveTo(x1, y1);
+            this._ctx.lineTo(x2, y2);
+            this._ctx.stroke();
+        }
+        
+        return true;
+    }
+
+    // ✅ CREAR CAMPO DE FÚTBOL
+    async createFootballField() {
+        if (!this._canvas) {
+            this.notify("error", "❌ Canvas no disponible.");
+            return;
+        }
+
+        this.notify("info", "🏟️ Creando campo de fútbol...");
+        
+        // Limpiar canvas primero
+        await this._cleanCanvas();
+        await this._delay(200);
+
+        // Calcular coordenadas del campo
+        const fieldCoords = this._calculateFieldCoordinates();
+
+        // Dibujar césped
+        await this._drawGrass(fieldCoords);
+        await this._delay(300);
+
+        // Dibujar porterías
+        await this._drawGoal(fieldCoords.leftGoal, this.FIELD_CONSTANTS.GOAL_P1_COLOR);
+        await this._drawGoal(fieldCoords.rightGoal, this.FIELD_CONSTANTS.GOAL_P2_COLOR);
+        await this._delay(300);
+
+        // Dibujar texto FOOTBALL
+        await this._drawFootballText(fieldCoords);
+
+        this.notify("success", "🏆 ¡Campo creado correctamente!");
+    }
+
+    _calculateFieldCoordinates() {
+        const width = this._canvas.width;
+        const height = this._canvas.height;
+        
+        return {
+            leftGoal: {
+                x: Math.floor(width * -0.05),
+                y: Math.floor(height * 0.67),
+                width: Math.floor(width * 0.25),
+                height: Math.floor(height * 0.42)
+            },
+            rightGoal: {
+                x: Math.floor(width * 0.80),
+                y: Math.floor(height * 0.67),
+                width: Math.floor(width * 0.25),
+                height: Math.floor(height * 0.42)
+            },
+            grass: {
+                y: height - 2,
+                triangleSpacing: Math.max(8, Math.floor(width * 0.015)),
+                triangleHeight: Math.max(10, Math.floor(height * 0.025))
+            },
+            text: {
+                x: Math.floor(width * 0.5),
+                y: Math.floor(height * 0.15),
+                pixelSize: Math.max(2, Math.floor(width * 0.006))
+            }
         };
-        addInput("brushsize", "Grosor:", "number", "2", "20", "4", "Tamaño del Pincel");
-        addInput("stepsize", "Paso Patrón:", "number", "5", "50", "10", "Tamaño del Paso del Patrón");
-        addInput("offsetX", "Offset X:", "number", "-50", "150", "0", "Desplazamiento Horizontal");
-        addInput("offsetY", "Offset Y:", "number", "-50", "150", "0", "Desplazamiento Vertical");
-        container.appendChild(controlsGroup);
-
-        // Action Buttons
-        const actionButtonsDiv = domMake.Tree("div", { class: "module-btn-group" });
-        this._ui.startButton = domMake.Button('<i class="fas fa-play-circle"></i> Iniciar');
-        this._ui.stopButton = domMake.Button('<i class="fas fa-stop-circle"></i> Detener');
-        this._ui.clearButton = domMake.Button('<i class="fas fa-eraser"></i> Limpiar Todo');
-        actionButtonsDiv.appendAll(this._ui.startButton, this._ui.stopButton, this._ui.clearButton);
-        container.appendChild(actionButtonsDiv);
-
-        this._ui.statusLabel = domMake.Tree("div", { id: `${this.identifier}-status`, class: "worldgen-status" }, ["Estado: Listo."]);
-        container.appendChild(this._ui.statusLabel);
     }
 
-    _setupEventListeners() {
-        this._ui.startButton.addEventListener('click', () => {
-            const pattern = this._ui.patternSelect.value;
-            const thickness = parseInt(this._ui.brushsize.value) || 4;
-            const stepSize = parseInt(this._ui.stepsize.value) || 10;
-            const offset = {
-                x: parseInt(this._ui.offsetX.value) || 0,
-                y: parseInt(this._ui.offsetY.value) || 0,
-            };
+    async _drawGrass(coords) {
+        const width = this._canvas.width;
+        const lineThickness = Math.max(4, Math.floor(width * 0.01));
+        
+        // Línea principal del césped
+        this._sendDrawCommand(0, coords.grass.y, width, coords.grass.y, this.FIELD_CONSTANTS.GRASS_COLOR, lineThickness);
+        await this._delay(60);
 
-            if (isNaN(thickness) || isNaN(stepSize) || isNaN(offset.x) || isNaN(offset.y)) {
-                this.notify("warning", "Valores de entrada inválidos.");
-                return;
+        // Triángulos de césped
+        for (let x = 0; x < width; x += coords.grass.triangleSpacing) {
+            const height = coords.grass.triangleHeight + (Math.random() * 6 - 3);
+            const tipX = x + (Math.random() * 4 - 2);
+            const tipY = coords.grass.y - height;
+            
+            this._sendDrawCommand(x, coords.grass.y, tipX, tipY, this.FIELD_CONSTANTS.GRASS_COLOR, 2);
+            this._sendDrawCommand(tipX, tipY, x + coords.grass.triangleSpacing, coords.grass.y, this.FIELD_CONSTANTS.GRASS_COLOR, 2);
+            await this._delay(25);
+        }
+    }
+
+    async _drawGoal(goalCoords, color) {
+        const frameThickness = this.FIELD_CONSTANTS.GOAL_THICKNESS;
+        const lineThickness = Math.max(1, Math.floor(frameThickness/2));
+        const lineMargin = Math.max(8, goalCoords.width * 0.08);
+        const topOffset = goalCoords.height * 0.05;
+
+        // Marco principal
+        this._sendDrawCommand(goalCoords.x, goalCoords.y, goalCoords.x, goalCoords.y + goalCoords.height, color, frameThickness);
+        this._sendDrawCommand(goalCoords.x, goalCoords.y, goalCoords.x + goalCoords.width, goalCoords.y, color, frameThickness);
+        this._sendDrawCommand(goalCoords.x + goalCoords.width, goalCoords.y, goalCoords.x + goalCoords.width, goalCoords.y + goalCoords.height, color, frameThickness);
+        await this._delay(80);
+
+        // Líneas interiores verticales
+        for (let i = 1; i <= 3; i++) {
+            const x = goalCoords.x + (goalCoords.width * i / 4);
+            this._sendDrawCommand(x, goalCoords.y + topOffset, x, goalCoords.y + goalCoords.height - topOffset, color, lineThickness);
+            await this._delay(60);
+        }
+
+        // Líneas interiores horizontales
+        for (let i = 1; i <= 4; i++) {
+            const y = goalCoords.y + (goalCoords.height * i / 5);
+            this._sendDrawCommand(goalCoords.x + lineMargin, y, goalCoords.x + goalCoords.width - lineMargin, y, color, lineThickness);
+            await this._delay(60);
+        }
+    }
+
+    // Patrones de letras para FOOTBALL
+    PIXEL_LETTERS = {
+        'F': [[1,1,1,1],[1,0,0,0],[1,1,1,0],[1,0,0,0],[1,0,0,0]],
+        'O': [[1,1,1,1],[1,0,0,1],[1,0,0,1],[1,0,0,1],[1,1,1,1]],
+        'T': [[1,1,1,1,1],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0]],
+        'B': [[1,1,1,1],[1,0,0,1],[1,1,1,1],[1,0,0,1],[1,1,1,1]],
+        'A': [[0,1,1,0],[1,0,0,1],[1,1,1,1],[1,0,0,1],[1,0,0,1]],
+        'L': [[1,0,0,0],[1,0,0,0],[1,0,0,0],[1,0,0,0],[1,1,1,1]]
+    };
+
+    async _drawFootballText(coords) {
+        const text = "FOOTBALL";
+        const letterSpacing = coords.text.pixelSize * 6;
+        const textWidth = text.length * letterSpacing;
+        let currentX = coords.text.x - (textWidth / 2);
+
+        for (let i = 0; i < text.length; i++) {
+            const letter = text[i].toUpperCase();
+            const pattern = this.PIXEL_LETTERS[letter];
+            if (!pattern) continue;
+
+            for (let row = 0; row < pattern.length; row++) {
+                for (let col = 0; col < pattern[row].length; col++) {
+                    if (pattern[row][col] === 1) {
+                        const pixelX = currentX + (col * coords.text.pixelSize);
+                        const pixelY = coords.text.y + (row * coords.text.pixelSize);
+                        this._sendDrawCommand(pixelX, pixelY, pixelX + 1, pixelY + 1, this.FIELD_CONSTANTS.TEXT_COLOR, coords.text.pixelSize);
+                        await this._delay(20);
+                    }
+                }
             }
+            currentX += letterSpacing;
+            await this._delay(50);
+        }
+    }
 
-            const socket = getGameSocket();
-            if (!socket || socket.readyState !== WebSocket.OPEN) {
-                this.notify("error", "No conectado a Drawaria. Por favor, asegúrate de estar en una sala.");
-                return;
+    // ✅ SISTEMA DE MATCH MODE
+    toggleMatchMode() {
+        const button = this._ui.matchModeToggle;
+        const scoreboard = this._ui.scoreboard;
+
+        this.matchMode.active = !this.matchMode.active;
+
+        if (this.matchMode.active) {
+            button.style.background = 'linear-gradient(135deg, #ffd700, #ffb347)';
+            scoreboard.style.display = 'block';
+            this._setupMatchMode();
+            this.notify('success', '🏆 ¡Modo partido activado!');
+        } else {
+            button.style.background = 'linear-gradient(135deg, #9b59b6, #8e44ad)';
+            scoreboard.style.display = 'none';
+            this._resetMatch();
+            this.notify('info', '🏆 Modo partido desactivado.');
+        }
+    }
+
+    async _setupMatchMode() {
+        // Crear campo automáticamente
+        await this.createFootballField();
+        
+        // Resetear puntuaciones
+        this.matchMode.scores = { p1: 0, p2: 0 };
+        this._updateScoreboard();
+        
+        // Configurar área de juego
+        this.matchMode.playArea = {
+            leftGoalX: this._canvas.width * -0.05,
+            rightGoalX: this._canvas.width * 0.80,
+            goalY: this._canvas.height * 0.67,
+            goalWidth: this._canvas.width * 0.25,
+            goalHeight: this._canvas.height * 0.42
+        };
+        
+        // Añadir pelota en el centro después de un delay
+        setTimeout(() => {
+            this.addBallAtCenter();
+        }, 500);
+    }
+
+    _resetMatch() {
+        this.matchMode.scores = { p1: 0, p2: 0 };
+        this._updateScoreboard();
+        this.matchMode.goalCooldown = false;
+    }
+
+    _updateScoreboard() {
+        if (this._ui.scoreP1) this._ui.scoreP1.textContent = this.matchMode.scores.p1;
+        if (this._ui.scoreP2) this._ui.scoreP2.textContent = this.matchMode.scores.p2;
+    }
+
+    // ✅ DETECCIÓN DE GOLES
+    _checkGoals() {
+        if (!this.matchMode.active || this.matchMode.goalCooldown) return;
+        
+        const playArea = this.matchMode.playArea;
+        const extraPadding = this.PHYSICS_CONSTANTS.BALL_RADIUS + 10;
+        
+        Array.from(this._physicsObjects.values()).forEach(obj => {
+            if (obj.type !== 'ball') return;
+            
+            // Gol P2 (portería izquierda)
+            if (obj.x >= playArea.leftGoalX - extraPadding &&
+                obj.x <= playArea.leftGoalX + playArea.goalWidth + extraPadding &&
+                obj.y >= playArea.goalY - extraPadding &&
+                obj.y <= playArea.goalY + playArea.goalHeight + extraPadding) {
+                this._scoreGoal('p2', obj);
             }
-
-            this._ui.statusLabel.textContent = `Dibujando ${pattern}...`;
-            this._drawPattern(pattern, thickness, stepSize, offset); // Populate executionLine
-            this._executePatternDrawing(socket); // Start execution
-        });
-
-        this._ui.stopButton.addEventListener('click', () => {
-            this._drawingActive = false;
-            this._ui.statusLabel.textContent = 'Dibujo detenido por el usuario.';
-        });
-
-        this._ui.clearButton.addEventListener('click', async () => {
-            const socket = getGameSocket();
-            if (!socket || socket.readyState !== WebSocket.OPEN) {
-                this.notify("error", "No conectado a Drawaria. Por favor, asegúrate de estar en una sala.");
-                return;
+            
+            // Gol P1 (portería derecha)
+            if (obj.x >= playArea.rightGoalX - extraPadding &&
+                obj.x <= playArea.rightGoalX + playArea.goalWidth + extraPadding &&
+                obj.y >= playArea.goalY - extraPadding &&
+                obj.y <= playArea.goalY + playArea.goalHeight + extraPadding) {
+                this._scoreGoal('p1', obj);
             }
-
-            this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height); // Clear local canvas immediately
-
-            const clearThickness = 1000;
-            const clearColor = '#FFFFFF';
-            const steps = 5;
-
-            for (let i = 0; i <= steps; i++) {
-                this._sendAndRenderDrawCommand(socket, [0, (i / steps) * 100], [100, (i / steps) * 100], clearColor, clearThickness);
-                await this._delay(20);
-                this._sendAndRenderDrawCommand(socket, [(i / steps) * 100, 0], [(i / steps) * 100, 100], clearColor, clearThickness);
-                await this._delay(20);
-            }
-            this._ui.statusLabel.textContent = 'Comandos de limpieza de lienzo enviados.';
         });
     }
 
-    _updateConnectionStatus(status) {
-        this._socketStatus = status;
-        const statusIndicator = document.getElementById(`${this.identifier}-connectionStatus`);
-        const statusText = document.getElementById(`${this.identifier}-statusText`);
+    async _scoreGoal(player, ballObject) {
+        if (this.matchMode.goalCooldown) return;
+        
+        this.matchMode.goalCooldown = true;
+        this.matchMode.scores[player]++;
+        this.gameStats.totalGoals++;
+        
+        // Actualizar marcador
+        this._updateScoreboard();
+        
+        // Remover la pelota que anotó
+        this._physicsObjects.delete(ballObject.id);
+        
+        this.notify("success", `⚽ ¡GOOOOL! ${player.toUpperCase()} anota!`);
+        
+        // Redibujar campo y añadir nueva pelota
+        await this.createFootballField();
+        
+        // Verificar fin de partido
+        if (this.matchMode.scores[player] >= this.matchMode.maxGoals) {
+            this.notify("success", `🏆 ¡${player.toUpperCase()} GANA EL PARTIDO!`);
+            setTimeout(() => this._resetMatch(), 3000);
+        } else {
+            // Añadir nueva pelota en el centro
+            setTimeout(() => this.addBallAtCenter(), 1000);
+        }
+        
+        // Cooldown de 2 segundos
+        setTimeout(() => {
+            this.matchMode.goalCooldown = false;
+        }, 2000);
+    }
 
-        if (statusIndicator && statusText) {
-            statusIndicator.className = `module-status-indicator module-status-${status}`;
-            statusText.textContent = status.charAt(0).toUpperCase() + status.slice(1);
-            // Enable/disable start button based on connection status
-            if (this._ui.startButton) {
-                this._ui.startButton.disabled = !(status === 'connected');
+    // ✅ SISTEMA DE PELOTAS
+    addBallAtCenter() {
+        if (!this._canvas) {
+            this.notify("error", "❌ Canvas no disponible.");
+            return;
+        }
+
+        this._createBall(this._canvas.width / 2, this._canvas.height / 2);
+        this.notify('success', '⚽ Pelota añadida en el centro.');
+    }
+
+    _createBall(x, y) {
+        const id = `ball_${this._objectIdCounter++}`;
+        const ball = {
+            id: id,
+            type: 'ball',
+            x: x,
+            y: y,
+            vx: (Math.random() - 0.5) * 100,
+            vy: (Math.random() - 0.5) * 100,
+            radius: this.PHYSICS_CONSTANTS.BALL_RADIUS,
+            color: this.controls.defaultObjectColor,
+            mass: this.PHYSICS_CONSTANTS.BALL_MASS,
+            lastRenderX: -9999,
+            lastRenderY: -9999
+        };
+        
+        this._physicsObjects.set(id, ball);
+        this.gameStats.objectsCreated++;
+        return ball;
+    }
+
+    // ✅ MOTOR DE FÍSICA
+    togglePhysics() {
+        if (this._isActive) {
+            this._stopPhysicsLoop();
+            this._ui.togglePhysicsBtn.textContent = '🚀 Launch Physics Engine';
+            this._ui.togglePhysicsBtn.style.background = 'linear-gradient(135deg, #3498db, #2980b9)';
+            this.notify('info', '🛑 Motor detenido.');
+        } else {
+            this._startPhysicsLoop();
+            this._ui.togglePhysicsBtn.textContent = '⏸️ Stop Physics Engine';
+            this._ui.togglePhysicsBtn.style.background = 'linear-gradient(135deg, #e74c3c, #c0392b)';
+            this.notify('success', '🚀 Motor iniciado.');
+        }
+    }
+
+    _startPhysicsLoop() {
+        if (this._isActive) return;
+        this._isActive = true;
+        this._lastRenderTime = performance.now();
+        this._update(performance.now());
+    }
+
+    _stopPhysicsLoop() {
+        this._isActive = false;
+    }
+
+    _update(currentTime) {
+        if (!this._isActive) return;
+        
+        const deltaTime = (currentTime - this._lastRenderTime) / 1000;
+        this._lastRenderTime = currentTime;
+
+        this._updatePhysics(deltaTime);
+        this._checkCollisions();
+        if (this.matchMode.active) {
+            this._checkGoals();
+        }
+        this._drawObjects();
+
+        requestAnimationFrame(this._update.bind(this));
+    }
+
+    _updatePhysics(deltaTime) {
+        const gravity = this.PHYSICS_CONSTANTS.GRAVITY;
+        const airResistance = this.PHYSICS_CONSTANTS.AIR_RESISTANCE;
+
+        this._physicsObjects.forEach(obj => {
+            // Aplicar resistencia del aire
+            obj.vx *= (1 - airResistance);
+            obj.vy *= (1 - airResistance);
+            
+            // Aplicar gravedad
+            obj.vy += gravity * deltaTime;
+            
+            // Limitar velocidad máxima
+            const speed = Math.sqrt(obj.vx ** 2 + obj.vy ** 2);
+            if (speed > this.PHYSICS_CONSTANTS.MAX_VELOCITY) {
+                const scale = this.PHYSICS_CONSTANTS.MAX_VELOCITY / speed;
+                obj.vx *= scale;
+                obj.vy *= scale;
             }
+            
+            // Actualizar posición
+            obj.x += obj.vx * deltaTime;
+            obj.y += obj.vy * deltaTime;
+        });
+    }
+
+    _checkCollisions() {
+        const gameWidth = this._canvas.width;
+        const gameHeight = this._canvas.height;
+        const restitution = this.PHYSICS_CONSTANTS.RESTITUTION_WALL;
+
+        this._physicsObjects.forEach(obj => {
+            // Colisiones con bordes
+            if (obj.x - obj.radius < 0) {
+                obj.velocity = -obj.vx * restitution;
+                obj.x = obj.radius;
+            }
+            if (obj.x + obj.radius > gameWidth) {
+                obj.vx = -obj.vx * restitution;
+                obj.x = gameWidth - obj.radius;
+            }
+            if (obj.y - obj.radius < 0) {
+                obj.vy = -obj.vy * restitution;
+                obj.y = obj.radius;
+            }
+            if (obj.y + obj.radius > gameHeight) {
+                obj.vy = -obj.vy * restitution;
+                obj.y = gameHeight - obj.radius;
+                obj.vx *= this.PHYSICS_CONSTANTS.FRICTION_GRASS; // Fricción en el suelo
+            }
+        });
+    }
+
+    _drawObjects() {
+        this._physicsObjects.forEach(obj => {
+            if (obj.type !== 'ball') return;
+            
+            const dx = Math.abs(obj.x - obj.lastRenderX);
+            const dy = Math.abs(obj.y - obj.lastRenderY);
+            
+            if (dx > 3 || dy > 3) {
+                // Borrar posición anterior
+                if (obj.lastRenderX !== -9999) {
+                    this._drawBall(obj.lastRenderX, obj.lastRenderY, obj.radius, '#FFFFFF');
+                }
+                
+                // Dibujar en nueva posición
+                this._drawBall(obj.x, obj.y, obj.radius, obj.color);
+                
+                obj.lastRenderX = obj.x;
+                obj.lastRenderY = obj.y;
+            }
+        });
+    }
+
+    _drawBall(x, y, radius, color) {
+        const thickness = radius * 2.5;
+        this._sendDrawCommand(x, y, x + 0.1, y + 0.1, color, thickness);
+    }
+
+    // ✅ FUNCIONES AUXILIARES
+    resetAllObjects() {
+        if (this._canvas) {
+            this._physicsObjects.forEach(obj => {
+                obj.x = this._canvas.width / 2 + (Math.random() - 0.5) * 100;
+                obj.y = this._canvas.height / 2 + (Math.random() - 0.5) * 100;
+                obj.vx = 0;
+                obj.vy = 0;
+                obj.lastRenderX = -9999;
+                obj.lastRenderY = -9999;
+            });
+            this.notify('success', '🔄 ¡Objetos reiniciados!');
+        }
+    }
+
+    clearAllObjects() {
+        this._physicsObjects.clear();
+        this._cleanCanvas();
+        this.notify('info', '🗑️ Todos los objetos eliminados.');
+    }
+
+    async _cleanCanvas() {
+        if (!this._canvas) return;
+        
+        const clearThickness = 1000;
+        const clearColor = '#FFFFFF';
+        const steps = 5;
+
+        for (let i = 0; i <= steps; i++) {
+            this._sendDrawCommand(0, (i / steps) * this._canvas.height, this._canvas.width, (i / steps) * this._canvas.height, clearColor, clearThickness);
+            this._sendDrawCommand((i / steps) * this._canvas.width, 0, (i / steps) * this._canvas.width, this._canvas.height, clearColor, clearThickness);
+            await this._delay(20);
+        }
+        
+        // Limpiar canvas local
+        if (this._ctx) {
+            this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
         }
     }
 
@@ -158,471 +734,18 @@ class PatternDrawerTool extends QBit {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    _getRainbowColor(step, totalSteps) {
-        if (totalSteps <= 0) return 'hsl(0, 100%, 50%)';
-        let hue = (step / totalSteps) * 360;
-        return `hsl(${hue}, 100%, 50%)`;
+    _startAdvancedStatsMonitoring() {
+        this._stopAdvancedStatsMonitoring();
+        this._statsInterval = setInterval(() => {
+            if (this._ui.objectCount) this._ui.objectCount.textContent = this._physicsObjects.size;
+            if (this._ui.goalsCount) this._ui.goalsCount.textContent = this.gameStats.totalGoals;
+        }, 1000);
     }
 
-    _clamp(value, min, max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    _sendAndRenderDrawCommand(socket, start_game_coords, end_game_coords, color, thickness) {
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            this.notify("warning", "WebSocket no conectado. No se puede enviar ni renderizar el comando de dibujo.");
-            return false;
+    _stopAdvancedStatsMonitoring() {
+        if (this._statsInterval) {
+            clearInterval(this._statsInterval);
+            this._statsInterval = null;
         }
-
-        const x1_norm = (start_game_coords[0] / 100);
-        const y1_norm = (start_game_coords[1] / 100);
-        const x2_norm = (end_game_coords[0] / 100);
-        const y2_norm = (end_game_coords[1] / 100);
-
-        // Local rendering
-        this._ctx.strokeStyle = color;
-        this._ctx.lineWidth = thickness;
-        this._ctx.lineCap = 'round';
-        this._ctx.lineJoin = 'round';
-        this._ctx.beginPath();
-        this._ctx.moveTo(x1_norm * this._canvas.width, y1_norm * this._canvas.height);
-        this._ctx.lineTo(x2_norm * this._canvas.width, y2_norm * this._canvas.height);
-        this._ctx.stroke();
-
-        const command = `42["drawcmd",0,[${x1_norm.toFixed(4)},${y1_norm.toFixed(4)},${x2_norm.toFixed(4)},${y2_norm.toFixed(4)},false,${0 - thickness},"${color}",0,0,{}]]`;
-        socket.send(command);
-        return true;
-    }
-
-    _drawPattern(pattern, thickness, stepSize, offset) {
-        this._executionLine = [];
-        const canvasWidth = 100, canvasHeight = 100; // Game coordinates 0-100
-        let stepCount = 0;
-
-        // Calculate total steps for rainbow coloring (simplified calculation for brevity)
-        let totalSteps = 0;
-        switch (pattern) {
-            case 'grid': totalSteps = Math.ceil(canvasWidth / stepSize) * 2; break;
-            case 'zigzag': totalSteps = Math.ceil(canvasWidth / stepSize); break;
-            case 'spiral': totalSteps = Math.floor((50 / (stepSize / 2)) * (Math.PI * 2 / 0.3)); break;
-            case 'waves': totalSteps = Math.ceil(canvasWidth / stepSize); break;
-            case 'circles': totalSteps = Math.floor(50 / stepSize); break;
-            case 'diagonals': totalSteps = Math.ceil((canvasWidth + canvasHeight) / stepSize); break;
-            case 'star': totalSteps = 16; break;
-            case 'crosshatch': totalSteps = Math.ceil((canvasWidth + canvasHeight) / stepSize) * 2; break;
-            case 'triangles': totalSteps = Math.ceil(canvasWidth / stepSize) * 2; break;
-            case 'dots': totalSteps = Math.ceil(canvasWidth / stepSize) * Math.ceil(canvasHeight / stepSize); break;
-            case 'hexagons': totalSteps = Math.ceil(canvasWidth / (stepSize * 1.5)) * Math.ceil(canvasHeight / (stepSize * Math.sqrt(3))); break;
-            case 'radiance': totalSteps = 24; break;
-            case 'checkerboard': totalSteps = Math.ceil(canvasWidth / stepSize) * Math.ceil(canvasHeight / stepSize) * 2; break;
-            case 'swirls': totalSteps = Math.floor((50 / (stepSize / 2)) * (Math.PI * 2 / 0.4)); break;
-            case 'lattice': totalSteps = Math.ceil((canvasWidth + canvasHeight) / stepSize) * 2; break;
-            case 'fractal': totalSteps = 31; break;
-            case 'arcs': totalSteps = Math.ceil(canvasHeight / stepSize) * Math.floor(Math.PI / 0.2); break;
-            case 'mosaic': totalSteps = Math.min(100, Math.floor((canvasWidth * canvasHeight) / (stepSize * stepSize))) * 2; break;
-            case 'ripples': totalSteps = Math.floor(50 / stepSize) * Math.floor(Math.PI * 2 / 0.2); break;
-            case 'vortex': totalSteps = Math.floor(Math.PI * 2 / 0.1); break;
-            default: totalSteps = 1;
-        }
-
-        if (pattern === 'grid') {
-            for (let x = 0; x <= canvasWidth; x += stepSize) {
-                this._executionLine.push({
-                    pos1: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(0 + offset.y, 0, canvasHeight)],
-                    pos2: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(canvasHeight + offset.y, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-            for (let y = 0; y <= canvasHeight; y += stepSize) {
-                this._executionLine.push({
-                    pos1: [this._clamp(0 + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)],
-                    pos2: [this._clamp(canvasWidth + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-        } else if (pattern === 'zigzag') {
-            let x = 0, y = 0;
-            while (x <= canvasWidth) {
-                let nextX = Math.min(x + stepSize, canvasWidth);
-                let nextY = (y === 0) ? canvasHeight : 0;
-                this._executionLine.push({
-                    pos1: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)],
-                    pos2: [this._clamp(nextX + offset.x, 0, canvasWidth), this._clamp(nextY + offset.y, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-                x = nextX;
-                y = nextY;
-                if (x === canvasWidth && y === 0) {
-                    this._executionLine.push({
-                        pos1: [this._clamp(canvasWidth + offset.x, 0, canvasWidth), this._clamp(0 + offset.y, 0, canvasHeight)],
-                        pos2: [this._clamp(canvasWidth + offset.x, 0, canvasWidth), this._clamp(canvasHeight + offset.y, 0, canvasHeight)],
-                        color: this._getRainbowColor(stepCount++, totalSteps),
-                        thickness: thickness
-                    });
-                }
-            }
-        } else if (pattern === 'spiral') {
-            let centerX = canvasWidth / 2 + offset.x;
-            let centerY = canvasHeight / 2 + offset.y;
-            let maxRadius = 50;
-            let angleStep = 0.3;
-            for (let r = 5; r <= maxRadius; r += stepSize / 2) {
-                for (let a = 0; a < Math.PI * 2; a += angleStep) {
-                    let x1 = centerX + r * Math.cos(a);
-                    let y1 = centerY + r * Math.sin(a);
-                    let x2 = centerX + r * Math.cos(a + angleStep);
-                    let y2 = centerY + r * Math.sin(a + angleStep);
-                    this._executionLine.push({
-                        pos1: [this._clamp(x1, 0, canvasWidth), this._clamp(y1, 0, canvasHeight)],
-                        pos2: [this._clamp(x2, 0, canvasWidth), this._clamp(y2, 0, canvasHeight)],
-                        color: this._getRainbowColor(stepCount++, totalSteps),
-                        thickness: thickness
-                    });
-                }
-            }
-        } else if (pattern === 'waves') {
-            let amplitude = 15;
-            let frequency = 0.05;
-            for (let x = 0; x <= canvasWidth; x += stepSize) {
-                let y1 = canvasHeight / 2 + amplitude * Math.sin(x * frequency) + offset.y;
-                let y2 = canvasHeight / 2 + amplitude * Math.sin(Math.min(x + stepSize, canvasWidth) * frequency) + offset.y;
-                this._executionLine.push({
-                    pos1: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(y1, 0, canvasHeight)],
-                    pos2: [this._clamp(Math.min(x + stepSize, canvasWidth) + offset.x, 0, canvasWidth), this._clamp(y2, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-        } else if (pattern === 'circles') {
-            let centerX = canvasWidth / 2 + offset.x;
-            let centerY = canvasHeight / 2 + offset.y;
-            let maxRadius = 50;
-            for (let r = stepSize; r <= maxRadius; r += stepSize) {
-                for (let a = 0; a < Math.PI * 2; a += 0.2) {
-                    let x1 = centerX + r * Math.cos(a);
-                    let y1 = centerY + r * Math.sin(a);
-                    let x2 = centerX + r * Math.cos(a + 0.2);
-                    let y2 = centerY + r * Math.sin(a + 0.2);
-                    this._executionLine.push({
-                        pos1: [this._clamp(x1, 0, canvasWidth), this._clamp(y1, 0, canvasHeight)],
-                        pos2: [this._clamp(x2, 0, canvasWidth), this._clamp(y2, 0, canvasHeight)],
-                        color: this._getRainbowColor(stepCount++, totalSteps),
-                        thickness: thickness
-                    });
-                }
-            }
-        } else if (pattern === 'diagonals') {
-            for (let i = -(canvasHeight); i <= canvasWidth; i += stepSize) {
-                let x1 = i, y1 = 0;
-                let x2 = i + canvasHeight, y2 = canvasHeight;
-
-                let startX = this._clamp(x1 + offset.x, 0, canvasWidth);
-                let startY = this._clamp(y1 + offset.y, 0, canvasHeight);
-                let endX = this._clamp(x2 + offset.x, 0, canvasWidth);
-                let endY = this._clamp(y2 + offset.y, 0, canvasHeight);
-
-                if (x1 < 0 && startY > 0) startX = (startY - offset.y) + offset.x;
-                if (x2 > canvasWidth && endY < canvasHeight) endX = (endY - offset.y) + offset.x;
-
-                this._executionLine.push({
-                    pos1: [startX, startY],
-                    pos2: [endX, endY],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-        } else if (pattern === 'star') {
-            let centerX = canvasWidth / 2 + offset.x;
-            let centerY = canvasHeight / 2 + offset.y;
-            let radius = 50;
-            for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
-                let x = centerX + radius * Math.cos(a);
-                let y = centerY + radius * Math.sin(a);
-                this._executionLine.push({
-                    pos1: [this._clamp(centerX, 0, canvasWidth), this._clamp(centerY, 0, canvasHeight)],
-                    pos2: [this._clamp(x, 0, canvasWidth), this._clamp(y, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-        } else if (pattern === 'crosshatch') {
-            for (let i = -canvasHeight; i <= canvasWidth; i += stepSize) {
-                let x1 = i, y1 = 0;
-                let x2 = i + canvasHeight, y2 = canvasHeight;
-
-                let startX = this._clamp(x1 + offset.x, 0, canvasWidth);
-                let startY = this._clamp(y1 + offset.y, 0, canvasHeight);
-                let endX = this._clamp(x2 + offset.x, 0, canvasWidth);
-                let endY = this._clamp(y2 + offset.y, 0, canvasHeight);
-
-                if (x1 < 0 && startY > 0) startX = (startY - offset.y) + offset.x;
-                if (x2 > canvasWidth && endY < canvasHeight) endX = (endY - offset.y) + offset.x;
-
-                this._executionLine.push({
-                    pos1: [startX, startY],
-                    pos2: [endX, endY],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-            for (let i = 0; i <= canvasWidth + canvasHeight; i += stepSize) {
-                let x1 = canvasWidth, y1 = i;
-                let x2 = 0, y2 = i - canvasWidth;
-
-                let startX = this._clamp(x1 + offset.x, 0, canvasWidth);
-                let startY = this._clamp(y1 + offset.y, 0, canvasHeight);
-                let endX = this._clamp(x2 + offset.x, 0, canvasWidth);
-                let endY = this._clamp(y2 + offset.y, 0, canvasHeight);
-
-                if (y1 > canvasHeight && startX < canvasWidth) startX = canvasWidth - (startY - offset.y - canvasHeight);
-                if (y2 < 0 && endX > 0) endX = (endY - offset.y);
-
-                this._executionLine.push({
-                    pos1: [startX, startY],
-                    pos2: [endX, endY],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-        } else if (pattern === 'triangles') {
-            for (let y = 0; y <= canvasHeight; y += stepSize * Math.sqrt(3)) {
-                for (let x = 0; x <= canvasWidth; x += stepSize * 2) {
-                    let p1_up = [x, y + stepSize * Math.sqrt(3)];
-                    let p2_up = [x + stepSize, y];
-                    let p3_up = [x + stepSize * 2, y + stepSize * Math.sqrt(3)];
-                    this._executionLine.push({ pos1: [this._clamp(p1_up[0] + offset.x, 0, canvasWidth), this._clamp(p1_up[1] + offset.y, 0, canvasHeight)], pos2: [this._clamp(p2_up[0] + offset.x, 0, canvasWidth), this._clamp(p2_up[1] + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                    this._executionLine.push({ pos1: [this._clamp(p2_up[0] + offset.x, 0, canvasWidth), this._clamp(p2_up[1] + offset.y, 0, canvasHeight)], pos2: [this._clamp(p3_up[0] + offset.x, 0, canvasWidth), this._clamp(p3_up[1] + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                    this._executionLine.push({ pos1: [this._clamp(p3_up[0] + offset.x, 0, canvasWidth), this._clamp(p3_up[1] + offset.y, 0, canvasHeight)], pos2: [this._clamp(p1_up[0] + offset.x, 0, canvasWidth), this._clamp(p1_up[1] + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-
-                    let p1_down = [x + stepSize, y + stepSize * Math.sqrt(3)];
-                    let p2_down = [x + stepSize * 1.5, y + stepSize * Math.sqrt(3) * 1.5];
-                    let p3_down = [x + stepSize * 0.5, y + stepSize * Math.sqrt(3) * 1.5];
-                    this._executionLine.push({ pos1: [this._clamp(p1_down[0] + offset.x, 0, canvasWidth), this._clamp(p1_down[1] + offset.y, 0, canvasHeight)], pos2: [this._clamp(p2_down[0] + offset.x, 0, canvasWidth), this._clamp(p2_down[1] + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                    this._executionLine.push({ pos1: [this._clamp(p2_down[0] + offset.x, 0, canvasWidth), this._clamp(p2_down[1] + offset.y, 0, canvasHeight)], pos2: [this._clamp(p3_down[0] + offset.x, 0, canvasWidth), this._clamp(p3_down[1] + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                    this._executionLine.push({ pos1: [this._clamp(p3_down[0] + offset.x, 0, canvasWidth), this._clamp(p3_down[1] + offset.y, 0, canvasHeight)], pos2: [this._clamp(p1_down[0] + offset.x, 0, canvasWidth), this._clamp(p1_down[1] + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                }
-            }
-        } else if (pattern === 'dots') {
-            for (let x = 0; x <= canvasWidth; x += stepSize) {
-                for (let y = 0; y <= canvasHeight; y += stepSize) {
-                    this._executionLine.push({
-                        pos1: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)],
-                        pos2: [this._clamp(x + offset.x + 0.1, 0, canvasWidth), this._clamp(y + offset.y + 0.1, 0, canvasHeight)],
-                        color: this._getRainbowColor(stepCount++, totalSteps),
-                        thickness: thickness
-                    });
-                }
-            }
-        } else if (pattern === 'hexagons') {
-            let hexSize = stepSize;
-            let hexWidth = hexSize * 1.5;
-            let hexHeight = hexSize * Math.sqrt(3);
-            for (let y = 0; y < canvasHeight + hexHeight; y += hexHeight) {
-                for (let x = 0; x < canvasWidth + hexWidth; x += hexWidth) {
-                    let offsetX_row = (Math.floor(y / hexHeight) % 2 === 0) ? 0 : hexWidth / 2;
-                    let points = [
-                        [x + offsetX_row, y + hexSize / 2],
-                        [x + offsetX_row + hexSize / 2, y],
-                        [x + offsetX_row + hexSize * 1.5, y],
-                        [x + offsetX_row + hexSize * 2, y + hexSize / 2],
-                        [x + offsetX_row + hexSize * 1.5, y + hexSize * 1.5],
-                        [x + offsetX_row + hexSize / 2, y + hexSize * 1.5]
-                    ];
-                    for (let i = 0; i < 6; i++) {
-                        let p1 = points[i];
-                        let p2 = points[(i + 1) % 6];
-                        this._executionLine.push({
-                            pos1: [this._clamp(p1[0] + offset.x, 0, canvasWidth), this._clamp(p1[1] + offset.y, 0, canvasHeight)],
-                            pos2: [this._clamp(p2[0] + offset.x, 0, canvasWidth), this._clamp(p2[1] + offset.y, 0, canvasHeight)],
-                            color: this._getRainbowColor(stepCount++, totalSteps),
-                            thickness: thickness
-                        });
-                    }
-                }
-            }
-        } else if (pattern === 'radiance') {
-            let centerX = canvasWidth / 2 + offset.x;
-            let centerY = canvasHeight / 2 + offset.y;
-            let radius = Math.min(centerX, centerY, canvasWidth - centerX, canvasHeight - centerY);
-            let numLines = 24;
-            for (let i = 0; i < numLines; i++) {
-                let angle = (i / numLines) * Math.PI * 2;
-                let endX = centerX + radius * Math.cos(angle);
-                let endY = centerY + radius * Math.sin(angle);
-                this._executionLine.push({
-                    pos1: [this._clamp(centerX, 0, canvasWidth), this._clamp(centerY, 0, canvasHeight)],
-                    pos2: [this._clamp(endX, 0, canvasWidth), this._clamp(endY, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-        } else if (pattern === 'checkerboard') {
-            for (let y = 0; y < canvasHeight; y += stepSize) {
-                for (let x = 0; x < canvasWidth; x += stepSize) {
-                    if ((Math.floor(x / stepSize) + Math.floor(y / stepSize)) % 2 === 0) {
-                        this._executionLine.push({ pos1: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)], pos2: [this._clamp(x + stepSize + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                        this._executionLine.push({ pos1: [this._clamp(x + stepSize + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)], pos2: [this._clamp(x + stepSize + offset.x, 0, canvasWidth), this._clamp(y + stepSize + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                        this._executionLine.push({ pos1: [this._clamp(x + stepSize + offset.x, 0, canvasWidth), this._clamp(y + stepSize + offset.y, 0, canvasHeight)], pos2: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(y + stepSize + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                        this._executionLine.push({ pos1: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(y + stepSize + offset.y, 0, canvasHeight)], pos2: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)], color: this._getRainbowColor(stepCount++, totalSteps), thickness: thickness });
-                    }
-                }
-            }
-        } else if (pattern === 'swirls') {
-            let centerX = canvasWidth / 2 + offset.x;
-            let centerY = canvasHeight / 2 + offset.y;
-            let maxRadius = 50;
-            let angleStep = 0.4;
-            for (let r = 5; r <= maxRadius; r += stepSize / 2) {
-                for (let a = 0; a < Math.PI * 2; a += angleStep) {
-                    let swirl = 5 * Math.sin(r * 0.1);
-                    let x1 = centerX + (r + swirl) * Math.cos(a);
-                    let y1 = centerY + (r + swirl) * Math.sin(a);
-                    let x2 = centerX + (r + swirl) * Math.cos(a + angleStep);
-                    let y2 = centerY + (r + swirl) * Math.sin(a + angleStep);
-                    this._executionLine.push({
-                        pos1: [this._clamp(x1, 0, canvasWidth), this._clamp(y1, 0, canvasHeight)],
-                        pos2: [this._clamp(x2, 0, canvasWidth), this._clamp(y2, 0, canvasHeight)],
-                        color: this._getRainbowColor(stepCount++, totalSteps),
-                        thickness: thickness
-                    });
-                }
-            }
-        } else if (pattern === 'lattice') {
-            for (let y = 0; y <= canvasHeight; y += stepSize) {
-                this._executionLine.push({
-                    pos1: [this._clamp(0 + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)],
-                    pos2: [this._clamp(canvasWidth + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-            for (let x = 0; x <= canvasWidth; x += stepSize) {
-                this._executionLine.push({
-                    pos1: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(0 + offset.y, 0, canvasHeight)],
-                    pos2: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(canvasHeight + offset.y, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-        } else if (pattern === 'fractal') {
-            const drawBranch = (x, y, length, angle, depth) => {
-                if (depth === 0) return;
-                let x2 = x + length * Math.cos(angle);
-                let y2 = y - length * Math.sin(angle);
-                this._executionLine.push({
-                    pos1: [this._clamp(x + offset.x, 0, canvasWidth), this._clamp(y + offset.y, 0, canvasHeight)],
-                    pos2: [this._clamp(x2 + offset.x, 0, canvasWidth), this._clamp(y2 + offset.y, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-                drawBranch(x2, y2, length * 0.7, angle + Math.PI / 4, depth - 1);
-                drawBranch(x2, y2, length * 0.7, angle - Math.PI / 4, depth - 1);
-            };
-            drawBranch(canvasWidth / 2, canvasHeight, stepSize * 2, Math.PI / 2, 4);
-        } else if (pattern === 'arcs') {
-            let numArcs = Math.floor(canvasHeight / stepSize);
-            for (let i = 0; i < numArcs; i++) {
-                let y = i * stepSize + offset.y;
-                let centerX = canvasWidth / 2 + offset.x;
-                let radius = canvasWidth / 2;
-                for (let a = 0; a <= Math.PI; a += 0.1) {
-                    let x1 = centerX + radius * Math.cos(a);
-                    let y1 = y + radius * Math.sin(a);
-                    let x2 = centerX + radius * Math.cos(a + 0.1);
-                    let y2 = y + radius * Math.sin(a + 0.1);
-                    this._executionLine.push({
-                        pos1: [this._clamp(x1, 0, canvasWidth), this._clamp(y1, 0, canvasHeight)],
-                        pos2: [this._clamp(x2, 0, canvasWidth), this._clamp(y2, 0, canvasHeight)],
-                        color: this._getRainbowColor(stepCount++, totalSteps),
-                        thickness: thickness
-                    });
-                }
-            }
-        } else if (pattern === 'mosaic') {
-            let squareSize = stepSize;
-            for (let y = 0; y < canvasHeight; y += squareSize) {
-                for (let x = 0; x < canvasWidth; x += squareSize) {
-                    let startX_inner = x + Math.random() * squareSize;
-                    let startY_inner = y + Math.random() * squareSize;
-                    let endX_inner = x + Math.random() * squareSize;
-                    let endY_inner = y + Math.random() * squareSize;
-                    this._executionLine.push({
-                        pos1: [this._clamp(startX_inner + offset.x, 0, canvasWidth), this._clamp(startY_inner + offset.y, 0, canvasHeight)],
-                        pos2: [this._clamp(endX_inner + offset.x, 0, canvasWidth), this._clamp(endY_inner + offset.y, 0, canvasHeight)],
-                        color: this._getRainbowColor(stepCount++, totalSteps),
-                        thickness: thickness
-                    });
-                }
-            }
-        } else if (pattern === 'ripples') {
-            let centerX = canvasWidth / 2 + offset.x;
-            let centerY = canvasHeight / 2 + offset.y;
-            let maxRadius = 50;
-            let rippleAmplitude = 5;
-            for (let r = stepSize; r <= maxRadius; r += stepSize) {
-                for (let a = 0; a < Math.PI * 2; a += 0.2) {
-                    let currentRadius = r + rippleAmplitude * Math.sin(a * 5);
-                    let x1 = centerX + currentRadius * Math.cos(a);
-                    let y1 = centerY + currentRadius * Math.sin(a);
-                    let x2 = centerX + currentRadius * Math.cos(a + 0.2);
-                    let y2 = centerY + currentRadius * Math.sin(a + 0.2);
-                    this._executionLine.push({
-                        pos1: [this._clamp(x1, 0, canvasWidth), this._clamp(y1, 0, canvasHeight)],
-                        pos2: [this._clamp(x2, 0, canvasWidth), this._clamp(y2, 0, canvasHeight)],
-                        color: this._getRainbowColor(stepCount++, totalSteps),
-                        thickness: thickness
-                    });
-                }
-            }
-        } else if (pattern === 'vortex') {
-            let centerX = canvasWidth / 2 + offset.x;
-            let centerY = canvasHeight / 2 + offset.y;
-            let maxRadius = 50;
-            let angleStep = 0.1;
-            let spiralTightness = 0.05;
-            for (let i = 0; i < maxRadius / (stepSize / 4); i++) {
-                let r = maxRadius - (i * stepSize / 4);
-                if (r < 0) r = 0;
-                let currentAngle = i * angleStep + spiralTightness * i;
-                let x1 = centerX + r * Math.cos(currentAngle);
-                let y1 = centerY + r * Math.sin(currentAngle);
-                let x2 = centerX + (r - stepSize / 4) * Math.cos(currentAngle + angleStep + spiralTightness);
-                let y2 = centerY + (r - stepSize / 4) * Math.sin(currentAngle + angleStep + spiralTightness);
-                this._executionLine.push({
-                    pos1: [this._clamp(x1, 0, canvasWidth), this._clamp(y1, 0, canvasHeight)],
-                    pos2: [this._clamp(x2, 0, canvasWidth), this._clamp(y2, 0, canvasHeight)],
-                    color: this._getRainbowColor(stepCount++, totalSteps),
-                    thickness: thickness
-                });
-            }
-        }
-    }
-
-    async _executePatternDrawing(socket) {
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            this.notify("error", "Error: Not connected to Drawaria room.");
-            return;
-        }
-
-        this._drawingActive = true;
-        for (let i = 0; i < this._executionLine.length; i++) {
-            if (!this._drawingActive) {
-                this.notify("info", 'Dibujo detenido.');
-                return;
-            }
-            let currentLine = this._executionLine[i];
-            let p1 = currentLine.pos1,
-                p2 = currentLine.pos2,
-                color = currentLine.color,
-                thickness = currentLine.thickness;
-
-            this._sendAndRenderDrawCommand(socket, p1, p2, color, thickness);
-            await this._delay(50);
-        }
-        this._drawingActive = false;
-        this.notify("success", 'Dibujo completado.');
     }
 }
